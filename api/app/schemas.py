@@ -292,29 +292,46 @@ class CalibrationOut(BaseModel):
 
 
 class RiskEventOut(BaseModel):
-    """消除/新增风险事件（展示值，三位小数；比较内部为未舍入双精度）。"""
+    """消除/新增风险的连续物理占用片段（展示值，三位小数；比较内部为未舍入）。
 
-    segment_index: int           # 该结论所属路径自身的线段下标
+    身份由「禁入圈 + 世界坐标区间 [entry, exit]」决定，与该占用被拆成
+    多少条线段无关：原样替换、共线补点、跨替换边界均不产生此类事件。
+    """
+
+    segment_index: int           # 片段入口点所属路径自身的线段下标
     circle_index: int
-    nearest: PointOut            # 判定位置
+    nearest: PointOut            # 判定位置（片段上距圆心最近点）
     distance: float
     expanded_radius: float
-    mileage: float               # 判定位置在该路径上的累计里程
+    mileage: float               # 兼容字段：等于 start_mileage
+    entry: PointOut              # 占用片段入口（世界坐标）
+    exit: PointOut               # 占用片段出口（零长相切时与 entry 相同）
+    start_mileage: float         # 入口点累计里程
+    end_mileage: float           # 出口点累计里程
+    length: float                # 占用长度（零长相切为 0）
 
 
 class PersistedRiskOut(BaseModel):
-    """仍存在的风险：同一条原线段上原线/候选线各自的里程（展示三位）。
+    """仍存在的风险：同一段物理占用在原线/候选线上的区间（展示三位）。
 
     前缀段两里程相等；后缀段里程按新路径长度重新累计，差值即里程平移。
+    世界坐标入口/出口两线相同（同一物理占用），分段方式不改变身份。
     """
 
-    segment_index: int           # 原线（= 候选前缀）线段下标
+    segment_index: int           # 原线入口段下标
     circle_index: int
     nearest: PointOut
     distance: float
     expanded_radius: float
     original_mileage: float
     candidate_mileage: float
+    original_entry: PointOut
+    original_exit: PointOut
+    candidate_entry: PointOut
+    candidate_exit: PointOut
+    original_end_mileage: float
+    candidate_end_mileage: float
+    length: float
 
 
 class CircleRiskOut(BaseModel):

@@ -92,6 +92,12 @@ export interface RiskEvent {
   distance: number;
   expanded_radius: number;
   mileage: number;
+  // 连续物理占用片段（身份按世界坐标区间，不随分段变化）
+  entry: Point;
+  exit: Point;
+  start_mileage: number;
+  end_mileage: number;
+  length: number;
 }
 
 export interface PersistedRisk {
@@ -102,6 +108,13 @@ export interface PersistedRisk {
   expanded_radius: number;
   original_mileage: number;
   candidate_mileage: number;
+  original_entry: Point;
+  original_exit: Point;
+  candidate_entry: Point;
+  candidate_exit: Point;
+  original_end_mileage: number;
+  candidate_end_mileage: number;
+  length: number;
 }
 
 export interface CircleRisk {

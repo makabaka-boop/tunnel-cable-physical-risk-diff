@@ -237,6 +237,11 @@ def _risk_event_view(ev: RiskEvent, rpt) -> RiskEventOut:
         distance=round3(ev.distance),
         expanded_radius=round3(ev.expanded_radius),
         mileage=round3(ev.mileage),
+        entry=rpt(ev.entry),
+        exit=rpt(ev.exit),
+        start_mileage=round3(ev.start_mileage),
+        end_mileage=round3(ev.end_mileage),
+        length=round3(ev.length),
     )
 
 
@@ -249,6 +254,13 @@ def _persisted_risk_view(pr: PersistedRisk, rpt) -> PersistedRiskOut:
         expanded_radius=round3(pr.expanded_radius),
         original_mileage=round3(pr.original_mileage),
         candidate_mileage=round3(pr.candidate_mileage),
+        original_entry=rpt(pr.original_entry),
+        original_exit=rpt(pr.original_exit),
+        candidate_entry=rpt(pr.candidate_entry),
+        candidate_exit=rpt(pr.candidate_exit),
+        original_end_mileage=round3(pr.original_end_mileage),
+        candidate_end_mileage=round3(pr.candidate_end_mileage),
+        length=round3(pr.length),
     )
 
 
@@ -375,10 +387,10 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
         summaries = diff_risks(
             original_nodes=nodes,
             candidate_nodes=candidate_nodes,
-            start_index=start_index,
-            end_index=end_index,
-            original_collisions=raw,
-            candidate_collisions=c_raw,
+            original_intervals=intervals,
+            candidate_intervals=c_intervals,
+            circles=circles,
+            cable_radius=payload.cable_radius,
         )
         circle_risk_views = _circle_risk_views(summaries, rpt)
         eliminated_count = sum(len(s.eliminated) for s in summaries)
