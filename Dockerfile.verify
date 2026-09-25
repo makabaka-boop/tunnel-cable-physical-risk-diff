@@ -1,0 +1,28 @@
+# 一次性验收镜像：Python 3.12（pytest）+ Node 20（Vitest 真实请求 / 生产构建）
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /verify
+
+# 后端测试依赖（先拷贝两个 requirements，保证 -r 相对引用有效）
+COPY api/requirements.txt api/requirements-dev.txt /tmp/api-reqs/
+RUN pip install --no-cache-dir -r /tmp/api-reqs/requirements-dev.txt
+
+# 后端源码
+COPY api /verify/api
+
+# 前端依赖（尽量利用层缓存）
+COPY web/package.json web/package-lock.json* /verify/web/
+RUN cd /verify/web && (npm ci || npm install)
+
+# 前端源码与验收脚本
+COPY web /verify/web
+COPY scripts/verify.sh /verify/verify.sh
+RUN chmod +x /verify/verify.sh
+
+CMD ["/verify/verify.sh"]
