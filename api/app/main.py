@@ -379,6 +379,8 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
             end_index=end_index,
             original_collisions=raw,
             candidate_collisions=c_raw,
+            original_intervals=intervals,
+            candidate_intervals=c_intervals,
         )
         circle_risk_views = _circle_risk_views(summaries, rpt)
         eliminated_count = sum(len(s.eliminated) for s in summaries)

@@ -108,16 +108,16 @@ def test_tangent_point_collision_is_eliminated_by_reroute():
     # 原线 (0,0)->(100,0)，扩张半径 15 的圆与线在 (50,0) 相切（零长碰撞）
     nodes = [(0.0, 0.0), (100.0, 0.0)]
     circles = [((50.0, 15.0), 15.0)]  # 已是扩张半径（cable+circle 合并夹具）
-    raw, _, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
+    raw, ivs, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
     assert len(raw) == 1
     assert raw[0].distance == 15.0  # 恰好相切
 
     # 改线上移 31：与扩张圆完全脱离（30 时恰好相切，必须再远 1mm）
     cand = build_candidate_nodes(nodes, 0, 1, [(0.0, 31.0), (100.0, 31.0)])
-    c_raw, _, _ = analyze_path_full(cand, circles, cable_radius=0.0)
+    c_raw, c_ivs, _ = analyze_path_full(cand, circles, cable_radius=0.0)
     assert c_raw == []
 
-    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw)
+    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw, ivs, c_ivs)
     assert len(summaries) == 1
     s = summaries[0]
     assert s.circle_index == 0
@@ -131,14 +131,14 @@ def test_tangent_point_collision_is_new_on_candidate():
     # 原线在 y=30（相离）；改线下移到 y=15，与 R=15 的圆在 (50,15) 相切
     nodes = [(0.0, 30.0), (100.0, 30.0)]
     circles = [((50.0, 0.0), 15.0)]
-    raw, _, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
+    raw, ivs, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
     assert raw == []
 
     cand = build_candidate_nodes(nodes, 0, 1, [(0.0, 15.0), (100.0, 15.0)])
-    c_raw, _, _ = analyze_path_full(cand, circles, cable_radius=0.0)
+    c_raw, c_ivs, _ = analyze_path_full(cand, circles, cable_radius=0.0)
     assert len(c_raw) == 1 and c_raw[0].distance == 15.0
 
-    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw)
+    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw, ivs, c_ivs)
     s = summaries[0]
     assert s.eliminated == () and s.remaining == ()
     assert len(s.added) == 1
@@ -160,21 +160,23 @@ def test_cross_junction_intrusion_persists_with_mileage_shift():
     assert ivs[0].exit_segment_index == 1
     assert ivs[0].start_mileage == 9.0 and ivs[0].end_mileage == 11.0
 
-    # 替换区间 [0,1]：新段 (0,0)->(10,0) 长度仍为 10（沿 x 轴），后缀段1
-    # 不变；边界节点 (10,0) 上的侵入在候选线依然存在。
+    # 替换区间 [0,1]：替代折点与原区间完全相同（原样替换）。侵入区间
+    # [9,11] 跨越替换边界而物理重叠未变——不得产生虚假的消除/新增，
+    # 段0 与后缀段1 上的风险都必须是「仍存在」，里程逐段一致。
     cand = build_candidate_nodes(nodes, 0, 1, [(0.0, 0.0), (10.0, 0.0)])
     c_raw, c_ivs, _ = analyze_path_full(cand, circles, cable_radius=0.0)
-    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw)
+    summaries = diff_risks(nodes, cand, 0, 1, raw, c_raw, ivs, c_ivs)
     s = summaries[0]
-    assert len(s.eliminated) == 1 and s.eliminated[0].segment_index == 0
-    # 段0 几何完全一致：差分按“替换段”归类为消除+新增（结构上区间被替换），
-    # 而后缀段1 必须仍存在，里程逐段一致。
-    assert len(s.added) == 1
-    assert len(s.remaining) == 1
-    rem = s.remaining[0]
-    assert rem.segment_index == 1
-    assert rem.original_mileage == 10.0
-    assert rem.candidate_mileage == 10.0
+    assert s.eliminated == () and s.added == ()
+    assert len(s.remaining) == 2
+    rem = {p.segment_index: p for p in s.remaining}
+    assert set(rem) == {0, 1}
+    for p in rem.values():
+        assert p.nearest == (10.0, 0.0)
+        assert p.original_mileage == 10.0
+        assert p.candidate_mileage == 10.0
+    # 候选线的连续侵入区间与原线完全一致（物理覆盖未变）
+    assert [(iv.start_mileage, iv.end_mileage) for iv in c_ivs] == [(9.0, 11.0)]
 
     # 改长替换段（绕远），后缀里程按新路径长度重新累计：
     # (0,0)->(0,-10)->(10,0) 前缀累计到 (10,0) 为 10+sqrt(200)=24.142…
@@ -182,8 +184,13 @@ def test_cross_junction_intrusion_persists_with_mileage_shift():
         nodes, 0, 1, [(0.0, 0.0), (0.0, -10.0), (10.0, 0.0)]
     )
     c2_raw, c2_ivs, _ = analyze_path_full(cand2, circles, cable_radius=0.0)
-    summaries2 = diff_risks(nodes, cand2, 0, 1, raw, c2_raw)
-    rem2 = [p for p in summaries2[0].remaining if p.segment_index == 1][0]
+    summaries2 = diff_risks(nodes, cand2, 0, 1, raw, c2_raw, ivs, c2_ivs)
+    # 真实绕行：原替换段（段0）的碰撞计为消除；候选替换段在边界节点
+    # (10,0) 仍命中（段1 (0,-10)->(10,0) 的最近点），计为新增。
+    s2 = summaries2[0]
+    assert {e.segment_index for e in s2.eliminated} == {0}
+    assert {a.segment_index for a in s2.added} == {1}
+    rem2 = [p for p in s2.remaining if p.segment_index == 1][0]
     assert rem2.original_mileage == 10.0
     assert math.isclose(rem2.candidate_mileage, 10.0 + 10.0 * math.sqrt(2.0))
     # 后缀段的区间在候选线上里程整体平移：进入里程 24.142…、离开 25.142…
@@ -200,7 +207,7 @@ def test_prefix_mileage_identical_suffix_reaccumulated():
     # 原线四段：替换中间区间 [1,2]
     nodes = [(0, 0), (10, 0), (20, 0), (30, 0)]
     circles = [((5, 0), 0.5), ((25, 0), 0.5)]
-    raw, _, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
+    raw, ivs, _ = analyze_path_full(nodes, circles, cable_radius=0.0)
     seg_circles = {(c.segment_index, c.circle_index) for c in raw}
     assert seg_circles == {(0, 0), (2, 1)}
 
@@ -208,8 +215,8 @@ def test_prefix_mileage_identical_suffix_reaccumulated():
     cand = build_candidate_nodes(
         nodes, 1, 2, [(10, 0), (10, 10), (20, 0)]
     )
-    c_raw, _, _ = analyze_path_full(cand, circles, cable_radius=0.0)
-    summaries = diff_risks(nodes, cand, 1, 2, raw, c_raw)
+    c_raw, c_ivs, _ = analyze_path_full(cand, circles, cable_radius=0.0)
+    summaries = diff_risks(nodes, cand, 1, 2, raw, c_raw, ivs, c_ivs)
     by = {s.circle_index: s for s in summaries}
     # 前缀段0：里程不变
     p0 = by[0].remaining[0]
@@ -247,10 +254,10 @@ def test_self_intersection_same_coordinate_keep_events_distinct():
     cand = build_candidate_nodes(
         nodes, 0, 1, [(0, 0), (0, 40), (100, 40), (100, 0)]
     )
-    c_raw, _, _ = analyze_path_full(cand, circles, cable_radius=0.0)
+    c_raw, c_ivs, _ = analyze_path_full(cand, circles, cable_radius=0.0)
     # 候选段 0 首点命中圆0；候选段 5（=原段3 平移 +2）命中圆0
     assert sorted((c.segment_index, c.circle_index) for c in c_raw) == [(0, 0), (5, 0)]
-    summaries = {s.circle_index: s for s in diff_risks(nodes, cand, 0, 1, raw, c_raw)}
+    summaries = {s.circle_index: s for s in diff_risks(nodes, cand, 0, 1, raw, c_raw, ivs, c_ivs)}
 
     # 圆0：原段0 事件消除、候选段0 事件新增（同坐标也不配对——它们分属
     # 被替换区间内外的不同结构段）；原段3 事件作为“仍存在”独立保留。

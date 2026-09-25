@@ -303,12 +303,14 @@ class RiskEventOut(BaseModel):
 
 
 class PersistedRiskOut(BaseModel):
-    """仍存在的风险：同一条原线段上原线/候选线各自的里程（展示三位）。
+    """仍存在的风险：同一物理占用在原线/候选线各自的里程（展示三位）。
 
-    前缀段两里程相等；后缀段里程按新路径长度重新累计，差值即里程平移。
+    前缀段两里程相等；后缀段里程按新路径长度重新累计，差值即里程平移；
+    几何等价的替换区间（原样替换/共线补点）按连续侵入区间归并为一项，
+    segment_index 取原线代表事件（最近逼近点）所属线段。
     """
 
-    segment_index: int           # 原线（= 候选前缀）线段下标
+    segment_index: int           # 原线线段下标（等价替换段内为代表事件所属段）
     circle_index: int
     nearest: PointOut
     distance: float

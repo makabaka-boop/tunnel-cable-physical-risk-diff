@@ -12,23 +12,35 @@
 
 - **前缀段**（下标 ``< start_index``）：候选线段下标与原线相同，里程逐段
   相同，碰撞一一对应为「仍存在」；
-- **替换段**：原线区间内的整段（含其在公共端点上的碰撞）被消除；
-  候选线替换折点产生的整段碰撞为「新增」；
 - **后缀段**（下标 ``>= end_index``）：候选下标 = 原下标 + 段数平移量，
   原线未改动后缀沿用几何，但里程必须按新路径长度重新累计；
-  ``remaining`` 事件同时给出两条线各自的未舍入里程，即里程平移量。
+  ``remaining`` 事件同时给出两条线各自的未舍入里程，即里程平移量；
+- **替换段**：先判定候选替换折线是否与原被替换折线**几何等价**——
+  互为共线加密（简化掉共线中间折点后顶点序列完全一致，整数毫米坐标
+  精确比较，不容差），再按模式差分。
+
+替换段的两种模式：
+
+- **非等价（真实绕行）**：保持结构语义——原替换段碰撞整体计为「消除」，
+  候选替换段碰撞整体计为「新增」；
+- **等价（原样替换 / 共线补点）**：物理占用未变，绝不产生虚假的
+  消除/新增。两侧碰撞按**连续侵入区间**（同一禁入圈在曲线上的极大
+  连通覆盖，是不随分段方式变化的物理占用身份）分组，每圈各自的区间组
+  沿里程一一对应；每组归并为一个「仍存在」项，代表点取组内**最近逼近**
+  事件（距离最小、里程最小者优先）——共线加密只是把同一物理位置复制
+  到更多线段上，最近逼近点不随分段方式变化，数量与位置因此稳定。
 
 自交路径上「同坐标、不同里程」的事件位于不同原线段，天然落入不同的
-结构键 ``(segment_index, circle_index)``，因此绝不会被误认为同一事件；
-全部判断使用 :mod:`geometry` 同一批未舍入双精度结果。
+结构键或不同的侵入区间组，绝不会被误认为同一事件；全部判断使用
+:mod:`geometry` 同一批未舍入双精度结果。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from .geometry import Collision, cumulative_mileage
+from .geometry import Collision, IntrusionInterval, cumulative_mileage
 
 Point = Tuple[float, float]
 
@@ -241,6 +253,155 @@ def _to_event(
     )
 
 
+# ---- 几何等价判定（共线加密 ⇔ 同一条物理曲线）----
+
+
+def _simplify_collinear(points: Sequence[Point]) -> List[Point]:
+    """删除严格位于相邻两点之间的共线折点（纯加密的中间定位点）。
+
+    坐标为整数毫米，叉积/点积在双精度内精确（坐标量级远小于 2^53），
+    不引入容差。折返（点积 ≤ 0）不是加密——它让曲线多次经过同一位置，
+    描画的是另一条曲线，必须保留。
+    """
+    stack: List[Point] = []
+    for p in points:
+        stack.append(p)
+        while len(stack) >= 3:
+            a, b, c = stack[-3], stack[-2], stack[-1]
+            abx, aby = b[0] - a[0], b[1] - a[1]
+            bcx, bcy = c[0] - b[0], c[1] - b[1]
+            if abx * bcy != aby * bcx:
+                break  # 不共线
+            if abx * bcx + aby * bcy <= 0.0:
+                break  # 折返或零步：不是纯共线加密
+            del stack[-2]
+    return stack
+
+
+def _replacement_is_equivalent(
+    original_nodes: Sequence[Point],
+    candidate_nodes: Sequence[Point],
+    start_index: int,
+    end_index: int,
+    shift: int,
+) -> bool:
+    """候选替换折线是否与原被替换折线描画同一条物理曲线。
+
+    互为共线加密（原样替换、只增删共线中间定位点）时等价：简化后的
+    顶点序列逐点精确相等。等价 ⇒ 两条折线覆盖的点集与里程参数化一致，
+    每个禁入圈在其上的物理占用（闭集）相同。
+    """
+    original_sub = original_nodes[start_index : end_index + 1]
+    candidate_sub = candidate_nodes[start_index : end_index + shift + 1]
+    return _simplify_collinear(original_sub) == _simplify_collinear(candidate_sub)
+
+
+# ---- 等价替换的物理占用差分 ----
+
+
+def _interval_group_ids(
+    intervals: Sequence[IntrusionInterval],
+) -> Dict[Tuple[int, int], int]:
+    """``(线段下标, 禁入圈)`` → 所属连续侵入区间号。
+
+    碰撞集合与区间片段一一对应（见 :func:`geometry.analyze_path_full`），
+    每个碰撞必属于恰好一个区间；区间即“同一禁入圈在曲线上的极大连通
+    覆盖”，是不随分段方式变化的物理占用身份。
+    """
+    group_of: Dict[Tuple[int, int], int] = {}
+    for gid, iv in enumerate(intervals):
+        for piece in iv.pieces:
+            group_of[(piece.segment_index, piece.circle_index)] = gid
+    return group_of
+
+
+def _representative(
+    events: Sequence[Collision],
+    nodes: Sequence[Point],
+    cum: Sequence[float],
+) -> Tuple[Collision, float]:
+    """组内最近逼近事件及其里程（距离最小；并列取里程最小者）。
+
+    最近逼近点是曲线弧段上的全局最近点：共线加密后，包含它的那条子
+    线段仍把它报为最近点，其余子线段只报更远的端点——代表点不随
+    分段方式变化。
+    """
+    best: Optional[Tuple[Tuple[float, float], Collision, float]] = None
+    for c in events:
+        mileage = _collision_mileage(c, nodes, cum)
+        key = (c.distance, mileage)
+        if best is None or key < best[0]:
+            best = (key, c, mileage)
+    assert best is not None  # 组由事件聚成，必然非空
+    return best[1], best[2]
+
+
+def _diff_equivalent_replacement(
+    original_replaced: Sequence[Collision],
+    candidate_replaced: Sequence[Collision],
+    original_intervals: Sequence[IntrusionInterval],
+    candidate_intervals: Sequence[IntrusionInterval],
+    original_nodes: Sequence[Point],
+    candidate_nodes: Sequence[Point],
+    cum_o: Sequence[float],
+    cum_c: Sequence[float],
+) -> Tuple[List[PersistedRisk], List[RiskEvent], List[RiskEvent]]:
+    """几何等价的替换区间：按物理占用（连续侵入区间）配对。
+
+    同一物理曲线 + 同一批禁入圈 ⇒ 两侧区间覆盖集合相同：每圈各自的
+    区间组按起始里程排序后一一对应，数量与位置不随分段方式变化。
+    每组归并为一个「仍存在」项（携带两条线各自的未舍入里程）；
+    理论上不会出现的余量按消除/新增如实报告。
+    """
+
+    def grouped(
+        events: Sequence[Collision],
+        intervals: Sequence[IntrusionInterval],
+    ) -> Dict[int, List[Tuple[float, int, List[Collision]]]]:
+        group_of = _interval_group_ids(intervals)
+        acc: Dict[int, List[Collision]] = {}
+        for c in events:
+            acc.setdefault(group_of[(c.segment_index, c.circle_index)], []).append(c)
+        per_circle: Dict[int, List[Tuple[float, int, List[Collision]]]] = {}
+        for gid, evs in acc.items():
+            per_circle.setdefault(evs[0].circle_index, []).append(
+                (intervals[gid].start_mileage, gid, evs)
+            )
+        for lst in per_circle.values():
+            lst.sort(key=lambda item: (item[0], item[1]))
+        return per_circle
+
+    o_groups = grouped(original_replaced, original_intervals)
+    c_groups = grouped(candidate_replaced, candidate_intervals)
+
+    remaining: List[PersistedRisk] = []
+    eliminated: List[RiskEvent] = []
+    added: List[RiskEvent] = []
+    for circle in sorted(set(o_groups) | set(c_groups)):
+        o_lst = o_groups.get(circle, [])
+        c_lst = c_groups.get(circle, [])
+        for (_, _, o_evs), (_, _, c_evs) in zip(o_lst, c_lst):
+            o_rep, o_mileage = _representative(o_evs, original_nodes, cum_o)
+            c_rep, c_mileage = _representative(c_evs, candidate_nodes, cum_c)
+            remaining.append(
+                PersistedRisk(
+                    segment_index=o_rep.segment_index,
+                    circle_index=circle,
+                    nearest=o_rep.nearest,
+                    distance=o_rep.distance,
+                    expanded_radius=o_rep.expanded_radius,
+                    original_mileage=o_mileage,
+                    candidate_mileage=c_mileage,
+                )
+            )
+        # 等价曲线上区间结构相同，两侧组数必相等；余量仅作防御性兜底。
+        for _, _, evs in o_lst[len(c_lst) :]:
+            eliminated.extend(_to_event(c, original_nodes, cum_o) for c in evs)
+        for _, _, evs in c_lst[len(o_lst) :]:
+            added.extend(_to_event(c, candidate_nodes, cum_c) for c in evs)
+    return remaining, eliminated, added
+
+
 def diff_risks(
     original_nodes: Sequence[Point],
     candidate_nodes: Sequence[Point],
@@ -248,26 +409,31 @@ def diff_risks(
     end_index: int,
     original_collisions: Sequence[Collision],
     candidate_collisions: Sequence[Collision],
+    original_intervals: Sequence[IntrusionInterval],
+    candidate_intervals: Sequence[IntrusionInterval],
 ) -> List[CircleRiskSummary]:
-    """按结构对应把两套碰撞差分为「消除 / 新增 / 仍存在」。
+    """把两套碰撞差分为「消除 / 新增 / 仍存在」。
 
-    结构键为 ``(原线段下标, 禁入圈输入序)``：候选前缀段下标不变，后缀段
-    下标平移 ``shift``，替换段不与任何原段配对。整个比较只用未舍入里程与
-    下标，不读取三位小数展示值，也不按坐标归并事件。
+    前缀/后缀段按结构键 ``(原线段下标, 禁入圈输入序)`` 配对：候选前缀段
+    下标不变，后缀段下标平移 ``shift``。替换区间先做**几何等价**判定
+    （共线加密 ⇔ 同一物理曲线）：等价时按连续侵入区间分组的物理占用
+    配对为「仍存在」，非等价（真实绕行）时保持结构语义——原替换段
+    碰撞为「消除」、候选替换段碰撞为「新增」。整个比较只用未舍入
+    双精度与结构/区间身份，不读取三位小数展示值，也不按坐标归并事件。
     """
     cum_o = cumulative_mileage(original_nodes)
     cum_c = cumulative_mileage(candidate_nodes)
 
     # 候选线：替换折点占 (len(replacement)-1) 段，原区间占
     # (end_index-start_index) 段；后缀段下标平移量即二者之差。
-    old_span = end_index - start_index
-    candidate_seg_count = len(candidate_nodes) - 1
-    original_seg_count = len(original_nodes) - 1
-    shift = candidate_seg_count - original_seg_count
+    shift = (len(candidate_nodes) - 1) - (len(original_nodes) - 1)
+    equivalent = _replacement_is_equivalent(
+        original_nodes, candidate_nodes, start_index, end_index, shift
+    )
 
-    # (orig_seg_index, circle) -> 候选碰撞（仅前缀/后缀，即“仍存在”域）
+    # 候选碰撞按结构域分流：前缀/后缀进入结构配对，替换段单独处理。
     persisted_pairs: Dict[Tuple[int, int], Collision] = {}
-    new_events: List[RiskEvent] = []
+    candidate_replaced: List[Collision] = []
     for c in candidate_collisions:
         j = c.segment_index
         if j < start_index:
@@ -275,17 +441,17 @@ def diff_risks(
         elif j >= end_index + shift:
             orig_seg = j - shift  # 后缀：下标平移
         else:
-            new_events.append(_to_event(c, candidate_nodes, cum_c))
+            candidate_replaced.append(c)
             continue
         persisted_pairs[(orig_seg, c.circle_index)] = c
 
     eliminated_events: List[RiskEvent] = []
     remaining: List[PersistedRisk] = []
+    original_replaced: List[Collision] = []
     for c in original_collisions:
         i = c.segment_index
-        unchanged = i < start_index or i >= end_index
-        if not unchanged:
-            eliminated_events.append(_to_event(c, original_nodes, cum_o))
+        if start_index <= i < end_index:
+            original_replaced.append(c)
             continue
         paired = persisted_pairs.pop((i, c.circle_index), None)
         if paired is None:
@@ -303,6 +469,32 @@ def diff_risks(
                 original_mileage=_collision_mileage(c, original_nodes, cum_o),
                 candidate_mileage=_collision_mileage(paired, candidate_nodes, cum_c),
             )
+        )
+
+    new_events: List[RiskEvent] = []
+    if equivalent:
+        # 原样替换 / 共线补点：物理占用未变，按连续侵入区间配对为
+        # 「仍存在」，不产生虚假的消除/新增。
+        rem, elim, add = _diff_equivalent_replacement(
+            original_replaced,
+            candidate_replaced,
+            original_intervals,
+            candidate_intervals,
+            original_nodes,
+            candidate_nodes,
+            cum_o,
+            cum_c,
+        )
+        remaining.extend(rem)
+        eliminated_events.extend(elim)
+        new_events.extend(add)
+    else:
+        # 真实绕行：替换段整体消除/新增（结构语义）。
+        eliminated_events.extend(
+            _to_event(c, original_nodes, cum_o) for c in original_replaced
+        )
+        new_events.extend(
+            _to_event(c, candidate_nodes, cum_c) for c in candidate_replaced
         )
 
     # 前缀/后缀候选段上出现、原线同键没有的碰撞（圆不变时几何相同不会
